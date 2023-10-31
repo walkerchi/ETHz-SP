@@ -1,0 +1,1 @@
+from .hollow_rectangle import hollow_rectangle
