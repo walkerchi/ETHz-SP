@@ -13,13 +13,16 @@ def scipy_bsr_matrix_from_coo(edata, u, v, shape):
     """
     assert len(edata) == len(u) == len(v), f"edata: {len(edata)}, u: {len(u)}, v: {len(v)} should be same"
     assert len(edata.shape) == 3, f"edata should be 3D array, but got {len(edata.shape)}"
-    nrows   = shape[0] // edata.shape[-2]
+    block_size = edata.shape[-1]
+    nrows   = shape[0] 
     args    = np.argsort(u)
     indptr  = np.zeros(nrows + 1, dtype=np.int64)
     indptr[1:] = np.cumsum(np.bincount(u[args], minlength=nrows))
     indices = v[args]
     edata   = edata[args]
-    return scipy.sparse.bsr_matrix((edata, indices, indptr), shape=shape, blocksize=edata.shape[1:])
+    return scipy.sparse.bsr_matrix((edata, indices, indptr), shape=(shape[0]*block_size, shape[1]*block_size), blocksize=(block_size, block_size))
+
+
 
 def torch_bsr_matrix_from_coo(edata, u, v, shape):
     if isinstance(edata, np.ndarray):
@@ -38,13 +41,23 @@ def torch_bsr_matrix_from_coo(edata, u, v, shape):
     # edata = edata.reshape( -1) # [n_edge, dim_1 * dim_2]
    
     # return torch.sparse_coo_tensor(torch.stack([u,v], 0), edata, size=shape)
+    block_size = edata.shape[-1]
+    row, col = u, v 
+    row   = row[:, None].repeat(1, block_size * block_size)
+    col   = col[:, None].repeat(1, block_size * block_size)
     nrows   = shape[0] // edata.shape[-2]
     args    = torch.argsort(u)
-    indptr  = torch.zeros(nrows + 1, dtype=torch.int64)
-    indptr[1:] = torch.cumsum(torch.bincount(u[args], minlength=nrows), dim=0)
-    indices = v[args]
-    edata   = edata[args]
-    return torch.sparse_bsr_tensor(indptr, indices, edata, size=shape)
+    i,j   = torch.meshgrid(torch.arange(block_size), torch.arange(block_size)) 
+    
+    row   = row * block_size+ i.flatten()
+    col   = col * block_size+ j.flatten()
+    
+    shape = (shape[0] * block_size, shape[1] * block_size)
+    row   = row.flatten()
+    col   = col.flatten()
+
+    return torch.sparse_coo_tensor(torch.stack([row, col], 0), edata.flatten(), size=shape)
+
     
 
 def partite(K_coo:scipy.sparse.coo_matrix, dirichlet_mask:np.ndarray):
@@ -199,3 +212,19 @@ def get_ele2msh_edge(edge_u, edge_v, elements, n_points):
     return  ele2msh_edge
 
 
+
+if __name__ == '__main__':
+    block_size = np.random.randint(1, 10)
+    r          = np.random.randint(1, 100)
+    density    = np.random.rand()
+    scipy_mat  = scipy.sparse.random(r, r, density=density, format="coo")
+    col, row   = scipy_mat.col, scipy_mat.row
+    edata      = np.random.rand(len(col), block_size, block_size)
+    shape      = scipy_mat.shape
+    mat        = scipy_bsr_matrix_from_coo(edata, row, col, shape).toarray()
+
+    label = np.zeros([r * block_size, r * block_size])
+    for i, j, v in zip(row, col, edata):
+        label[i*block_size:(i+1)*block_size, j*block_size:(j+1)*block_size] += v
+    
+    np.testing.assert_allclose(mat, label)

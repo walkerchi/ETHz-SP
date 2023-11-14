@@ -3,12 +3,105 @@ import scipy.sparse
 import torch 
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import pyvista as pv
 from .utils import element2edge, \
                   get_ele2msh_node, \
                   get_ele2msh_edge, \
                   scipy_bsr_matrix_from_coo, \
                  torch_bsr_matrix_from_coo, \
                  partite
+
+
+
+
+def get_gauss_points(n:int):
+    """
+        Parameters:
+        -----------
+            n : int
+                the order of the quadrature
+        Returns:
+        --------
+            weights: torch.Tensor of shape [n]
+                the quadrature weights
+            points: torch.Tensor of shape [n, 2]
+                the quadrature points
+    """
+    if n == 1:
+        weights = np.array([ 0.16666666666666666,])
+        points = np.array([ [ 0.25, 0.25, 0.25],]) 
+    elif n == 2:
+        weights = np.array([ 0.041666666666666664, 0.041666666666666664, 0.041666666666666664, 0.041666666666666664,])
+        points = np.array([ [ 0.5854101966249685, 0.1381966011250105, 0.1381966011250105,], [ 0.1381966011250105, 0.1381966011250105, 0.1381966011250105,], [ 0.1381966011250105, 0.1381966011250105, 0.5854101966249685,], [ 0.1381966011250105, 0.5854101966249685, 0.1381966011250105,],]) 
+    elif n == 3:
+        weights = np.array([ -0.13333333333333333, 0.075, 0.075, 0.075, 0.075,])
+        points = np.array([ [ 0.25, 0.25, 0.25,], [ 0.5, 0.1666666666666667, 0.1666666666666667,], [ 0.1666666666666667, 0.1666666666666667, 0.1666666666666667,], [ 0.1666666666666667, 0.1666666666666667, 0.5,], [ 0.1666666666666667, 0.5, 0.1666666666666667,],])
+    else:
+        raise Exception(f"n must be 1, 2 or 3, but got {n}")
+    return weights, points
+
+def shape_val_p1(quadrature):
+    """
+        Parameters:
+        -----------
+            quadrature: torch.Tensor [n_quadrature, n_dim]
+                        n_dim = 3 for tetra
+        Returns:
+        --------
+            phi      : torch.Tensor [n_quadrature, n_basis]
+                        n_basis = 4
+    """
+    n_quadrature, n_dim = quadrature.shape[-2:]
+    assert n_dim == 3, f"n_dim must be 3 for tetra , but got {n_dim}"
+
+    phi = np.zeros((*quadrature.shape[:-1], 4), dtype=quadrature.dtype)
+    x, y, z = quadrature[..., 0], quadrature[..., 1], quadrature[..., 2]
+    phi[..., 0] = 1 - x - y - z
+    phi[..., 1] = x
+    phi[..., 2] = y 
+    phi[..., 3] = z
+    return phi
+
+def shape_grad_p1(quadrature, element_coords, return_jac=False):
+    """
+        Parameters:
+        -----------
+            quadrature: torch.Tensor [n_quadrature, n_dim]
+            element_coords: torch.Tensor [n_element, n_corner, n_dim]
+                        n_dim = 3 for tetra
+            return_jac: bool
+                        whether to return the jacobian
+                        default is False
+        Returns:
+        --------
+            grad_phi: torch.Tensor of shape [n_element, n_quadrature, n_basis, n_dim]
+                the gradient of the base functions
+            jac     : torch.Tensor of shape [n_element, n_quadrature, n_dim, n_dim]
+                the jacobian of the base functions
+                if return_jac is False, then jac is None
+    """
+    assert element_coords.dtype == quadrature.dtype, f"element_coords.dtype must be {quadrature.dtype}, but got {element_coords.dtype}"
+    assert len(element_coords.shape) == 3, f"element_coords must be 3D of shape [n_element, 4, 3], but got {element_coords.shape}"
+    n_quadrature, n_dim = quadrature.shape 
+    n_element, n_basis, _ = element_coords.shape
+    assert n_dim == 3, f"n_dim must be 3 for tetra , but got {n_dim}"
+    assert n_basis == 4, f"n_basis must be 4 for tetra , but got {n_basis}"
+    
+    grad_phi = np.zeros([n_quadrature, n_basis, n_dim], dtype=quadrature.dtype)
+    grad_phi[..., 0, :] = -1
+    grad_phi[..., 1, 0] = 1
+    grad_phi[..., 2, 1] = 1
+    grad_phi[..., 3, 2] = 1
+    
+    jac  = np.einsum("ebj,qbi->eqij", element_coords, grad_phi)
+    ijac =  np.linalg.inv(jac)
+    grad_phi = np.einsum("qbi,eqji->eqbj", grad_phi, ijac)
+
+    if return_jac:
+        return grad_phi, jac
+    else:
+        return grad_phi
+
 
 class TetraSolver:
     def __init__(self, mesh, E=None, nu=None):
@@ -43,27 +136,21 @@ class TetraSolver:
 
         # compute Galerkin matrix
         elem_coords = points[elements] # [n_element, n_basis, n_dim]
-        shape_grad  = np.array([
-            [-1, 1, 0, 0],
-            [-1, 0, 1, 0],
-            [-1, 0, 0, 1]
-        ])  # [n_dim, n_basis]
-
-        J           = np.einsum("ib,nbj->nij", shape_grad, elem_coords)  # [n_element, n_dim, n_dim]
-        invJ        = np.linalg.inv(J) # [n_element, n_dim, n_dim]
-        detJ        = np.linalg.det(J) # [n_element]
-        shape_grad  = np.einsum("nij, jb->nib", invJ, shape_grad) # [n_element, n_dim, n_basis]
-        
-        B           = np.zeros((n_element, np.math.factorial(n_dim), n_basis*n_dim)) # [n_element, n_dim!,  n_basis*n_dim]
-        B[:, 0, ::n_dim]  = shape_grad[:, 0]
-        B[:, 1, 1::n_dim] = shape_grad[:, 1]
-        B[:, 2, 2::n_dim] = shape_grad[:, 2]
-        B[:, 3, ::n_dim]  = shape_grad[:, 1]
-        B[:, 3, 1::n_dim] = shape_grad[:, 0]
-        B[:, 4, 1::n_dim] = shape_grad[:, 2]
-        B[:, 4, 2::n_dim] = shape_grad[:, 1]
-        B[:, 5, ::n_dim]  = shape_grad[:, 2]
-        B[:, 5, 2::n_dim] = shape_grad[:, 0]
+        quadrature_weights, quadrature_points = get_gauss_points(2) # [n_quadrature], [n_quadrature, n_dim]
+        shape_grad, jac = shape_grad_p1(quadrature_points, elem_coords, return_jac=True) # [n_element, n_quadrature, n_basis, n_dim]
+        jac_det     = np.linalg.det(jac) # [n_element, n_quadrature]
+        jxw         = np.abs(jac_det) * quadrature_weights # [n_element, n_quadrature]
+        n_quadrature = quadrature_weights.shape[0]
+        B           = np.zeros((n_element, n_quadrature, np.math.factorial(n_dim), n_basis*n_dim)) # [n_element, n_quadrature n_dim!,  n_basis*n_dim]
+        B[:, :, 0, ::n_dim]  = shape_grad[..., 0]
+        B[:, :, 1, 1::n_dim] = shape_grad[..., 1]
+        B[:, :, 2, 2::n_dim] = shape_grad[..., 2]
+        B[:, :, 3, ::n_dim]  = shape_grad[..., 1]
+        B[:, :, 3, 1::n_dim] = shape_grad[..., 0]
+        B[:, :, 4, 1::n_dim] = shape_grad[..., 2]
+        B[:, :, 4, 2::n_dim] = shape_grad[..., 1]
+        B[:, :, 5, ::n_dim]  = shape_grad[..., 2]
+        B[:, :, 5, 2::n_dim] = shape_grad[..., 0]
 
         # lambda+2mu  lambda     lambda     0     0     0
         # lambda      lambda+2mu lambda     0     0     0
@@ -75,12 +162,11 @@ class TetraSolver:
         lambda_       = E * nu / ((1 + nu) * (1 - 2 * nu))
         mu            = E / (2 * (1 + nu))
         D             = np.zeros((n_element, var_dim, var_dim)) # [n_element, n_dim!, n_dim!]
-        D[:,:var_dim//2, :var_dim//2]              += lambda_ 
-        D[:,np.arange(var_dim),np.arange(var_dim)] += mu
-        D[:,np.arange(var_dim//2),np.arange(var_dim//2)] += mu
-        weight        = 1/6
+        D[:,:var_dim//2, :var_dim//2]              += lambda_ [:,None, None]
+        D[:,np.arange(var_dim),np.arange(var_dim)] += mu [:, None]
+        D[:,np.arange(var_dim//2),np.arange(var_dim//2)] += mu [:, None]
 
-        K_local = weight * np.einsum("nia, nij, njb->nab", B, D, B) * detJ[:, None, None] # [n_element, n_basis*n_dim, n_basis*n_dim]
+        K_local = np.einsum("nqia, nij, nqjb, nq->nab", B, D, B, jxw) # [n_element, n_basis*n_dim, n_basis*n_dim]
         K_local = K_local.reshape(n_element, n_basis, n_dim, n_basis, n_dim).transpose(0,1,3,2,4) # [n_element, n_basis, n_basis, n_dim, n_dim]
 
         # assemble Galerkin matrix
@@ -91,7 +177,7 @@ class TetraSolver:
         K_global = ele2msh_edge @ K_local.reshape(-1, n_dim * n_dim) # [n_edge, n_dim * n_dim] 
 
         K_coo = scipy_bsr_matrix_from_coo(
-            K_global.reshape(ele2msh_edge.shape[0], n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points  * n_dim)
+            K_global.reshape(ele2msh_edge.shape[0], n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ).tocoo() # [n_dim * n_point, n_dim * n_point]
 
         
@@ -124,7 +210,7 @@ class TetraSolver:
             size=ele2msh_edge.shape
         )
         self.K_torch  = torch_bsr_matrix_from_coo(
-            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points*n_dim)
+            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ) # [n_dim * n_point, n_dim * n_point]
     
     def scipy_solve(self, 
@@ -183,30 +269,30 @@ class TetraSolver:
 
         return u.reshape(self.n_points, self.n_dim)
     
-    def compute_vm_stress(self, u):
-        """
-            Parameters:
-            -----------
-                u: np.ndarray, shape [n_point, n_dim]
-                    displacement of the points
-            Returns:
-            --------
-                vm_stress: np.ndarray, shape [n_points]
-                    stress of the elements
-        """
-        n_element, n_dim = self.elements.shape
-        elem_u = u[self.elements].reshape(n_element, -1) # [n_element, n_basis * n_dim]
-        strain = np.einsum('nbi,ni->nb', self.B, elem_u) # [n_element, n_basis]
-        stress = np.einsum('nij,nj->ni', self.D, strain) # [n_element, n_basis]
+    # def compute_vm_stress(self, u):
+    #     """
+    #         Parameters:
+    #         -----------
+    #             u: np.ndarray, shape [n_point, n_dim]
+    #                 displacement of the points
+    #         Returns:
+    #         --------
+    #             vm_stress: np.ndarray, shape [n_points]
+    #                 stress of the elements
+    #     """
+    #     n_element, n_dim = self.elements.shape
+    #     elem_u = u[self.elements].reshape(n_element, -1) # [n_element, n_basis * n_dim]
+    #     strain = np.einsum('nbi,ni->nb', self.B, elem_u) # [n_element, n_basis]
+    #     stress = np.einsum('nij,nj->ni', self.D, strain) # [n_element, n_basis]
 
-        ele2msh_node = get_ele2msh_node(self.elements, self.n_points) # [n_points, n_element]
-        stress = ele2msh_node @ stress # [n_element, n_basis] - > [n_points, n_basis]
+    #     ele2msh_node = get_ele2msh_node(self.elements, self.n_points) # [n_points, n_element]
+    #     stress = ele2msh_node @ stress # [n_element, n_basis] - > [n_points, n_basis]
 
-        vm_stress = np.sqrt(
-            0.5 * ()stress[:, 0] ** 2 + stress[:, 1] ** 2 - stress[:, 0] * stress[:, 1] + 3 * stress[:, 2] ** 2
-        ) 
+    #     vm_stress = np.sqrt(
+    #         0.5 * ()stress[:, 0] ** 2 + stress[:, 1] ** 2 - stress[:, 0] * stress[:, 1] + 3 * stress[:, 2] ** 2
+    #     ) 
 
-        return vm_stress
+    #     return vm_stress
 
     def compute_residual(self, u, mse=True):
         """
@@ -219,8 +305,13 @@ class TetraSolver:
                 residual: np.ndarray, shape [n_point, n_dim] or float  if mse is True
                     residual of the points
         """
-        # solve
-        r = self.K_coo @ u.ravel() - self.source_value.ravel()
+        if isinstance(u, torch.Tensor):
+            self.K_torch = self.K_torch.to(u.device).type(u.dtype)
+            f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device)
+            r = self.K_torch @ u.reshape(-1, 1) - f.reshape(-1, 1)
+        elif isinstance(u, np.ndarray):
+            f = self.source_value
+            r = self.K_coo @ u.ravel() - f.ravel()
         if mse:
             return (r * r).mean()
         else:
@@ -235,32 +326,26 @@ class TetraSolver:
         """
         
         if len(kwargs) == 0:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.triplot(self.points[:, 0], self.points[:, 1], self.elements, color="k", zorder=1)
-            ax.scatter(self.points[:, 0], self.points[:, 1], s=50, c="r", zorder=10, marker="o")
-            for  i, (x, y) in enumerate(self.points):
-                ax.text(x, y, f"n{i}", color="violet", fontsize=16)
-            for  i, (x, y) in enumerate(self.points[self.elements].mean(1)):
-                ax.text(x, y, f"e{i}", color="green", fontsize=16)
-            ax.autoscale()
-            ax.margins(0.1)
-            plt.show()
+
+            mesh = pv.from_meshio(mesh)
+            p = pv.Plotter()
+            p.add_mesh_clip_plane(mesh, assign_to_axis='z',  show_edges=True, cmap="jet")
+            p.add_axes()
+            p.show()
 
         else:
             ncols = len(kwargs)
-            fig, ax = plt.subplots(ncols=ncols, figsize=(ncols*5, 4),squeeze=False)
+            mesh = pv.from_meshio(self.mesh)
+
+            plotter = pv.Plotter(shape=(1, ncols))
             for i,(k, value) in enumerate(kwargs.items()):
-                tpc = ax[0,i].tripcolor(self.points[:, 0], self.points[:, 1], self.elements, value, shading="gouraud", cmap="jet", zorder=0)
-                # ax[0,i].triplot(self.points[:, 0], self.points[:, 1], self.elements, alpha=0.2, color="k", zorder=1)
-                # ax[0,i].scatter(self.points[:, 0], self.points[:, 1], s=20, alpha=0.2, c="r", zorder=10, marker="o")
-                # ax[0,i].scatter(self.points[self.source_mask.any(1), 0], self.points[self.source_mask.any(1), 1], s=50, c="b", zorder=10, marker="v", label="force")
-                # ax[0,i].scatter(self.points[self.dirichlet_mask.any(1), 0], self.points[self.dirichlet_mask.any(1), 1], s=50, c="g", zorder=10, marker="^", label="dirichlet")
-                ax[0,i].autoscale()
-                ax[0,i].margins(0.1)
-                ax[0,i].legend()
-                cb = plt.colorbar(tpc, ax=ax[i])
-                cb.set_label(k)
-            plt.show()
+                mesh.point_data[k] = value
+                plotter.subplot(0, i)
+                plotter.add_mesh_clip_plane(mesh, assign_to_axis='z',scalars=k, cmap="jet", show_edges=True, show_scalar_bar=True)
+                plotter.add_text(k, font_size=10, position='upper_edge')
+                plotter.add_axes()
+                
+            plotter.show()
                 
 
 

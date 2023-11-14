@@ -16,8 +16,6 @@ def parse_args(parser):
     # for task 
     parser.add_argument('--task', type=str, default="train", choices=["train", "test"])
     parser.add_argument('--force', action='store_true')
-    # for trainer
-    parser.add_argument('--trainer', type=str, default="multiscale")
 
     # for dataset
     parser.add_argument('--d', type=float, default=0.2, help="mesh size")
@@ -38,6 +36,8 @@ def parse_args(parser):
     parser.add_argument('--train_ratios', nargs="+", default=None)
     parser.add_argument('--test_ratio', type=float, default=0.5)
     parser.add_argument('--eval_every_eps', type=int, default=5)
+    parser.add_argument('--use_physics', action="store_true")
+    parser.add_argument('--physical_weight', type=float, default=1.0)
 
 
     parser.add_argument('--dataset', type=str, default='spherical_shell')
@@ -149,7 +149,6 @@ if __name__ == '__main__':
         torch.cuda.manual_seed(seed)
         np.random.seed(seed)
       
-    
     def run_trainer(arg):
         manual_seed(arg.seed)
         Trainer = {
@@ -183,8 +182,6 @@ if __name__ == '__main__':
         else:
             raise NotImplementedError()
         
-    
-    
     args = parse_file()
     
     if isinstance(args, (list, tuple)):
@@ -199,7 +196,7 @@ if __name__ == '__main__':
                     results[f"{arg.model}_condense"] = mse
                 else:
                     results[arg.model] = mse
-            plot_test(results, f"test on {args[0].dataset} with characteristic length {args[0].d}", f"./.result/{arg.trainer}_test_score_{args[0].d}.png")
+            plot_test(results, f"test on {args[0].dataset} with characteristic length {args[0].d}", f"./.result/{arg.trainer}/test_score_{args[0].d}{'_phy' if arg.use_physics else ''}.png")
         else:
             for i,arg in enumerate(args):
                 assert arg.train_ratio + arg.test_ratio <= 1.0, f"train_ratio + test_ratio should be less than 1.0"

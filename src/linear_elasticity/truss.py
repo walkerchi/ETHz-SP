@@ -4,6 +4,7 @@ import skfem
 import skfem.helpers
 import trusspy
 import torch 
+import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from .utils import scipy_bsr_matrix_from_coo, torch_bsr_matrix_from_coo, partite
@@ -113,11 +114,11 @@ class TrussSolver:
                     default None
         """
         if E is None:
-            assert "E" in mesh.cell_data_dict.keys(), "E should be provided"
-            E = mesh.cell_data_dict["E"]["line"]
+            assert "E" in mesh.field_data.keys(), "E should be provided"
+            E = mesh.field_data["E"]
         if A is None:
-            assert "A" in mesh.cell_data_dict.keys(), "A should be provided"
-            A = mesh.cell_data_dict["A"]["line"]
+            assert "A" in mesh.field_data.keys(), "A should be provided"
+            A = mesh.field_data["A"]
     
         points = mesh.points
         truss  = mesh.cells_dict["line"]
@@ -156,11 +157,12 @@ class TrussSolver:
             np.arange(n_edges),# [2 * n_element + n_point] since there are self-looped undirected graph
             (edge_u, edge_v)
         ), shape=(n_points, n_points)).tocsr()
+      
         assert eids_graph.nnz == n_edges, f"eids_graph.nnz: {eids_graph.nnz}, should be {n_edges}, the truss elements are overlapped"
         K_local_nids_u = truss[:, :, None].repeat(n_basis, 2) # [n_element, n_src_basis, n_dst_basis] do as meshgrid
         K_local_nids_v = truss[:, None, :].repeat(n_basis, 1) # [n_element, n_src_basis, n_dst_basis]
         K_local_eids = np.array(eids_graph[K_local_nids_u.ravel(), K_local_nids_v.ravel()]).ravel() # [n_element * n_src_basis * n_dst_basis]
-       
+      
         ele2msh_edge = scipy.sparse.coo_matrix((
             np.ones(n_element * n_basis * n_basis),
             (K_local_eids, np.arange(n_element * n_basis * n_basis))
@@ -169,9 +171,9 @@ class TrussSolver:
         K_global = ele2msh_edge @ K_local.reshape(-1, n_dim * n_dim) # [n_edge, n_dim * n_dim] 
 
         K_coo = scipy_bsr_matrix_from_coo(
-            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points*n_dim)
+            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points ,  n_points)
         ).tocoo() # [n_dim * n_point, n_dim * n_point]
-
+        
         self.dirichlet_mask = mesh.point_data["dirichlet_mask"]
         self.dirichlet_value= mesh.point_data["dirichlet_value"]
         self.source_mask    = mesh.point_data["source_mask"]
@@ -193,10 +195,9 @@ class TrussSolver:
             size=ele2msh_edge.shape
         )
         self.K_torch  = torch_bsr_matrix_from_coo(
-            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points*n_dim)
+            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ) # [n_dim * n_point, n_dim * n_point]
-        
-
+      
     def trusspy_solve(self,
                     dirichlet_mask = None,
                     dirichlet_value = None,
@@ -398,7 +399,7 @@ class TrussSolver:
 
         return u.reshape(self.n_points, self.n_dim)
     
-    def compute_torch_residual(self, u, f):
+    def compute_residual(self, u, mse=True):
         """
             Parameters:
             -----------
@@ -409,9 +410,20 @@ class TrussSolver:
                 residual: np.ndarray, shape [n_point, n_dim]
                     residual of the points
         """
-        shape = u.shape
-        r = (self.K_torch @ u.reshape(-1, 1)).reshape(shape) - f
-        return r
+        if isinstance(u, torch.Tensor):
+            self.K_torch = self.K_torch.to(u.device).type(u.dtype)
+            f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device).reshape(self.n_points * self.n_dim, 1)
+            r = (self.K_torch @ u.reshape(-1, 1)) - f
+        elif isinstance(u, np.ndarray):
+            f = self.source_value.reshape(self.n_points * self.n_dim)
+            r = (self.K_coo @ u.reshape(-1)) - f
+        else:
+            raise NotImplementedError
+        if mse:
+            r = (r**2).mean()
+            return r 
+        else:
+            return r.reshape(self.n_points, self.n_dim)
 
     def compute_stress(self, u, return_strain=False):
         """

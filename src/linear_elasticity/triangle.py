@@ -34,8 +34,8 @@ def get_quadrature_points(n:int):
         ])
         points = np.array([
             [1/3, 1/3]
-        ], device=device)
-    elif n == 3:
+        ])
+    elif n == 2:
         weights = np.array([
                 1/6, 1/6, 1/6
             ])
@@ -44,7 +44,7 @@ def get_quadrature_points(n:int):
             [2/3, 1/6],
             [1/6, 2/3]
         ])
-    elif n == 4:
+    elif n == 3:
         weights = np.array([
             -27/96, 25/96, 25/96, 25/96
         ])
@@ -141,7 +141,7 @@ def get_shape_grad(quadrature, element_coords, p=1, return_jac=False):
         raise  NotImplementedError(f"p: {p} is not implemented")
     
     
-    jac  = np.einsum("bhi,ghj->bgij", element_coords, grad_phi)
+    jac  = np.einsum("bhj,ghi->bgij", element_coords, grad_phi)
     ijac = np.linalg.inv(jac)
     grad_phi = np.einsum("gbi,ngji->ngbj", grad_phi, ijac)
 
@@ -182,21 +182,27 @@ class TriangleSolver:
         n_dim     = points.shape[1]
         n_basis   = elements.shape[1]
         n_element = elements.shape[0]
-        n_quadrature = 3
         assert n_dim == 2, f"n_dim must be 2 for triangle , but got {n_dim}"
 
         # compute Galerkin matrix
         elem_coords = points[elements] # [n_element, n_basis, n_dim]
-        quadrature_weights, quadrature_points = get_quadrature_points(n_quadrature) # [n_quadrature], [n_quadrature, n_dim]
+        quadrature_weights, quadrature_points = get_quadrature_points(1) # [n_quadrature], [n_quadrature, n_dim]
         shape_grad, jac = get_shape_grad(quadrature_points, elem_coords, p=1, return_jac=True) # [n_element, n_quadrature, n_basis, n_dim]
         jac_det     = np.linalg.det(jac) # [n_element, n_quadrature]
-        jxw         = jac_det * quadrature_weights # [n_element, n_quadrature]
+        jxw         = np.abs(jac_det) * quadrature_weights # [n_element, n_quadrature]
+        n_quadrature = jxw.shape[1]
 
-        B           = np.zeros((n_element, n_quadrature, n_dim*(n_dim+1)//2, n_basis*n_dim)) # [n_element, n_quadrature, n_dim*(n_dim+1)/2,  n_basis*n_dim]
-        B[:, :, 0, 0::n_dim] = shape_grad[:,:,:,0]
-        B[:, :, 1, 1::n_dim] = shape_grad[:,:,:,1]
-        B[:, :, 2, 0::n_dim] = shape_grad[:,:,:,1]
-        B[:, :, 2, 1::n_dim] = shape_grad[:,:,:,0]
+
+        B           = np.zeros((n_element, n_quadrature, n_basis, n_dim*(n_dim+1)//2, n_dim))
+        B[:, :, :, 0, 0] = shape_grad[:,:,:,0]
+        B[:, :, :, 1, 1] = shape_grad[:,:,:,1]
+        B[:, :, :, 2, 0] = shape_grad[:,:,:,1]
+        B[:, :, :, 2, 1] = shape_grad[:,:,:,0]
+        # B           = np.zeros((n_element, n_quadrature, n_dim*(n_dim+1)//2, n_basis*n_dim)) # [n_element, n_quadrature, n_dim*(n_dim+1)/2,  n_basis*n_dim]
+        # B[:, :, 0, 0::n_dim] = shape_grad[:,:,:,0]
+        # B[:, :, 1, 1::n_dim] = shape_grad[:,:,:,1]
+        # B[:, :, 2, 0::n_dim] = shape_grad[:,:,:,1]
+        # B[:, :, 2, 1::n_dim] = shape_grad[:,:,:,0]
 
         #  1, nu, 0
         #  nu, 1, 0
@@ -207,9 +213,11 @@ class TriangleSolver:
         D[:, 2, 2]       = (1 - nu) / 2
         D *= E[:, None, None] / (1 - nu[:, None, None] ** 2)
        
-        K_local = np.einsum("nqia, nij, nqjb, nq->nab", B, D, B, jxw) # [n_element, n_basis*n_dim, n_basis*n_dim]
-        K_local = K_local.reshape(n_element, n_basis, n_dim, n_basis, n_dim).transpose(0,1,3,2,4) # [n_element, n_basis, n_basis, n_dim, n_dim]
 
+        K_local = np.einsum("eqaim, eij, eqbjn, eq->eqabmn", B, D, B, jxw) # [n_element, n_basis, n_basis, n_dim, n_dim]
+        # K_local = np.einsum("nqia, nij, nqjb, nq->nab", B, D, B, jxw) # [n_element, n_basis*n_dim, n_basis*n_dim]
+        # K_local = K_local.reshape(n_element, n_basis, n_dim, n_basis, n_dim).transpose(0,1,3,2,4) # [n_element, n_basis, n_basis, n_dim, n_dim]
+     
         # assemble Galerkin matrix
         edge_u, edge_v = element2edge(elements, n_points)
         n_edges        = edge_u.shape[0]
@@ -218,7 +226,7 @@ class TriangleSolver:
         K_global = ele2msh_edge @ K_local.reshape(-1, n_dim * n_dim) # [n_edge, n_dim * n_dim] 
 
         K_coo = scipy_bsr_matrix_from_coo(
-            K_global.reshape(ele2msh_edge.shape[0], n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points  * n_dim)
+            K_global.reshape(ele2msh_edge.shape[0], n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ).tocoo() # [n_dim * n_point, n_dim * n_point]
 
         dirichlet_mask = mesh.point_data["dirichlet_mask"]
@@ -254,7 +262,7 @@ class TriangleSolver:
             size=ele2msh_edge.shape
         )
         self.K_torch  = torch_bsr_matrix_from_coo(
-            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points * n_dim,  n_points*n_dim)
+            K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ) # [n_dim * n_point, n_dim * n_point]
     
     def skfem_solve(self):
@@ -304,7 +312,8 @@ class TriangleSolver:
         assert dirichlet_value.shape == (self.n_points, self.n_dim), f"dirichlet_value.shape: {dirichlet_value.shape}, should be {(self.n_points, self.n_dim)}"
         assert source_mask.shape    == (self.n_points, self.n_dim), f"source_mask.shape: {source_mask.shape}, should be {(self.n_points, self.n_dim)}"
         assert source_value.shape   == (self.n_points, self.n_dim), f"source_value.shape: {source_value.shape}, should be {(self.n_points, self.n_dim)}"
-                                             
+
+                      
         # compute load vector
         F = np.zeros(self.n_points * self.n_dim) # [n_point * n_dim]
         F[source_mask.ravel()] = source_value[source_mask].ravel() # [n_point * n_dim]
@@ -324,8 +333,6 @@ class TriangleSolver:
 
         return u.reshape(self.n_points, self.n_dim)
     
-
-
     def compute_stress(self, u, return_strain=False, return_vm_stress=False):
         """
             Parameters:
@@ -385,8 +392,14 @@ class TriangleSolver:
                 residual: np.ndarray, shape [n_point, n_dim] or float  if mse is True
                     residual of the points
         """
-        # solve
-        r = self.K_coo @ u.ravel() - self.source_value.ravel()
+        if isinstance(u, torch.Tensor):
+            self.K_torch = self.K_torch.type(u.dtype).to(u.device)
+            f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device)
+            r = self.K_torch @ u.reshape(-1, 1) - f.reshape(-1, 1)
+        elif isinstance(u, np.ndarray):
+            r = self.K_coo @ u.ravel() - self.source_value.ravel()
+        else:
+            raise NotImplementedError(f"u should be torch.Tensor or np.ndarray, but got {type(u)}")
         if mse:
             return (r * r).mean()
         else:
@@ -417,7 +430,7 @@ class TriangleSolver:
             fig, ax = plt.subplots(ncols=ncols, figsize=(ncols*5, 4),squeeze=False)
             for i,(k, value) in enumerate(kwargs.items()):
                 tpc = ax[0,i].tripcolor(self.points[:, 0], self.points[:, 1], self.elements, value, shading="gouraud", cmap="jet", zorder=0)
-                # ax[0,i].triplot(self.points[:, 0], self.points[:, 1], self.elements, alpha=0.2, color="k", zorder=1)
+                ax[0,i].triplot(self.points[:, 0], self.points[:, 1], self.elements, alpha=0.2, color="k", zorder=1)
                 # ax[0,i].scatter(self.points[:, 0], self.points[:, 1], s=20, alpha=0.2, c="r", zorder=10, marker="o")
                 ax[0,i].scatter(self.points[self.source_mask.any(1), 0], self.points[self.source_mask.any(1), 1], s=50, c="b", zorder=10, marker="v", label="force")
                 ax[0,i].scatter(self.points[self.dirichlet_mask.any(1), 0], self.points[self.dirichlet_mask.any(1), 1], s=50, c="g", zorder=10, marker="^", label="dirichlet")

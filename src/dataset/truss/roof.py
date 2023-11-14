@@ -90,14 +90,11 @@ def howe(
             "source_mask": source_mask,
             "source_value": source_value,
             },
-        cell_data={
-         
-            "E": [np.ones(len(truss), dtype=np.float64) * E],
-            "A": [np.ones(len(truss), dtype=np.float64) * A],
-        
-        },
     )
 
+    mesh.field_data["E"] = np.ones(len(truss), dtype=np.float64) * E
+    mesh.field_data["A"] = np.ones(len(truss), dtype=np.float64) * A
+ 
     return mesh
 
 
@@ -187,12 +184,9 @@ def pratt(
             "source_mask": source_mask,
             "source_value": source_value,
             },
-        cell_data={
-         
-            "E": [np.ones(len(truss), dtype=np.float64) * E],
-            "A": [np.ones(len(truss), dtype=np.float64) * A],
-        
-        },
     )
 
+    mesh.field_data["E"] = np.ones(len(truss), dtype=np.float64) * E
+    mesh.field_data["A"] = np.ones(len(truss), dtype=np.float64) * A
+ 
     return mesh

@@ -44,12 +44,6 @@ def spherical_shell(
             "source_mask": source_mask,
             "source_value": source_value,
         }
-        mesh.cell_data_dict = {
-            "E" : {
-                "tetra": np.ones(len(mesh.cells[0]), dtype=np.float64) * E
-            },
-            "nu": {
-                "tetra": np.ones(len(mesh.cells[0]), dtype=np.float64) * nu
-            },
-        }
+        mesh.field_data["E"] = np.ones(len(mesh.cells_dict['tetra']),dtype=np.float64) * E 
+        mesh.field_data["nu"] = np.ones(len(mesh.cells_dict['tetra']),dtype=np.float64) * nu
         return mesh

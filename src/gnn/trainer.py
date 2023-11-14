@@ -12,32 +12,44 @@ from copy import deepcopy
 from typing import Any
 
 from .model import init_model, BipartiteModel, BipartiteEdgeModel
-from dataset import SphericalShell, Truss
+from dataset import Truss, Triangle, Tetra
 
 from .utils import Normalizer, partite_graph
 
 def init_dataset(args):
- 
-    if args.dataset == "spherical_shell":
-        return SphericalShell(
+    if args.dataset in Truss.NAMES:
+        return Truss(
+            name=args.dataset,
+            E  = args.E,
+            A  = args.A,
+            n_grid = args.n_grid,
+            support = args.m_support,
             d = args.d,
-            E = args.E,
+            a = args.a,
+            p = args.p,
+        )
+    elif args.dataset in Triangle.NAMES:
+        return Triangle(
+            name=args.dataset,
+            E  = args.E,
             nu = args.nu,
+            d = args.d,
             a = args.a,
             b = args.b,
             p = args.p,
         )
-    elif args.dataset == "truss":
-        return Truss(
-            name="bridge.pratt",	
+    elif args.dataset in Tetra.NAMES:
+        return Tetra(
+            name=args.dataset,
             E  = args.E,
             nu = args.nu,
-            n_grid = args.n_grid,
-            support = args.m_support,
+            d = args.d,
+            a = args.a,
+            b = args.b,
+            p = args.p,
         )
     else:
-        raise NotImplementedError()
-
+        raise NotImplementedError(f"{args.dataset} is not implemented")
 
 
 class OneTrainer:
@@ -153,11 +165,14 @@ class OneTrainer:
         
         self.to(self.device)
         model_str = str(self.model_i) if args.use_condense else str(self.model)
-        self.model_weight_path = f"./.result/OneTrainer_{self.args.dataset}_{self.args.train_ratio}_{model_str}_model{'_condense' if args.use_condense else ''}.pth"
-        self.loss_image_path   = f"./.result/OneTrainer_{self.args.dataset}_{self.args.train_ratio}_{model_str}_loss{'_condense' if args.use_condense else ''}.png"
+        self.model_weight_path = f"./.result/{self.args.trainer}/{self.args.dataset}/{self.args.train_ratio}_{model_str}_model{'_condense' if args.use_condense else ''}{'_phy' if args.use_physics else ''}.pth"
+        self.loss_image_path   = f"./.result/{self.args.trainer}/{self.args.dataset}/{self.args.train_ratio}_{model_str}_loss{'_condense' if args.use_condense else ''}{'_phy' if args.use_physics else ''}.png"
+        os.makedirs(os.path.dirname(self.model_weight_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.loss_image_path), exist_ok=True)
+
 
     def predict(self):
-
+   
         if self.args.use_condense:
             if self.args.model == "NodeEdgeGNN":
                 f = self.model_b2i(self.graph_b2i.x, self.graph_b2i.edata, self.graph_b2i.edge_index, self.graph_b2i.num_dst_nodes) # outer -> inner
@@ -199,15 +214,36 @@ class OneTrainer:
             u = self.predict()
             y = self.graph_i.y
             if mode != "all":
-                u = u[self.graph_i[mask_key]]
-                y = y[self.graph_i[mask_key]]
+                u_labeled = u[self.graph_i[mask_key]]
+                y_labeled = y[self.graph_i[mask_key]]
+            else:
+                u_labeled = u 
+                y_labeled = y
         else:
             u = self.predict()
             y = self.graph.y
             if mode != "all":
-                u = u[self.graph[mask_key]]
-                y = y[self.graph[mask_key]]
-        loss = torch.nn.MSELoss()(u, y)
+                u_labeled = u[self.graph[mask_key]]
+                y_labeled = y[self.graph[mask_key]]
+            else:
+                u_labeled = u 
+                y_labeled = y
+        loss = torch.nn.MSELoss()(u_labeled, y_labeled)
+
+        if self.args.use_physics and mode == "train":
+            if self.args.use_condense:
+                u_global = torch.zeros_like(self.graph.n_pos, dtype=self.dtype, device=u.device)
+                u_global[~self.graph.n_dirichlet_mask] += u 
+                u_global[self.graph.n_dirichlet_mask] += self.graph_b2i.n_displacement_u.to(u.device)
+            else:
+                u_global = u
+
+            physical_loss = self.dataset.compute_residual(u_global, mse=True) # (n_nodes, 1)
+            loss = {
+                "data loss": loss,
+                "physical loss": physical_loss * self.args.physical_weight,
+            }
+           
         return loss
     
     def save(self):
@@ -276,8 +312,8 @@ class OneTrainer:
     def fit(self):
 
         self.train_mode()
-        train_losses    = []
-        valid_losses    = []
+        train_losses    = {}
+        valid_losses    = {}
 
         best_model, best_epoch, best_loss = None, None, float('inf')
 
@@ -286,10 +322,19 @@ class OneTrainer:
             self.optimizer.zero_grad()
 
             loss = self.compute_loss(mode="train")
-        
-            loss.backward()
-            train_losses.append(loss.item())
 
+            if isinstance(loss, dict):
+                for key, value in loss.items():
+                    train_losses.setdefault(key, []).append(value.item())
+                loss = sum(loss.values())
+                train_losses.setdefault("total loss", []).append(loss.item())
+                loss.backward()
+            elif isinstance(loss, torch.Tensor):
+                loss.backward()
+                train_losses.setdefault("loss", []).append(loss.item())
+                train_losses.append()
+            else:
+                raise NotImplementedError(f"loss type {type(loss)} is not implemented")
             self.optimizer.step()
             
             if (ep + 1) % self.args.eval_every_eps == 0:
@@ -297,8 +342,15 @@ class OneTrainer:
                 with torch.no_grad():
                     loss = self.compute_loss(mode="valid")
                 self.train_mode()
-                loss = loss.item()
-                valid_losses.append(loss)
+
+                if isinstance(loss, dict):
+                    for key, value in loss.items():
+                        valid_losses.setdefault(key, []).append(value.item())
+                    loss = sum(loss.values()).item()
+                    valid_losses.setdefault("total loss", []).append(loss)
+                elif isinstance(loss, torch.Tensor):
+                    valid_losses.setdefault("loss", []).append(loss.item())
+                    loss = loss.item()
                 if loss < best_loss:
                     best_loss = loss
                     best_epoch = ep
@@ -314,10 +366,13 @@ class OneTrainer:
 
         # plot the train/valid/test losses best validation point in one figure
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(np.arange(len(train_losses)), train_losses, label='train', linestyle=":")
-        ax.plot(np.arange(len(valid_losses)) * self.args.eval_every_eps, valid_losses, label='valid', linestyle="-")
-        ax.scatter([self.args.epochs], [loss], label='test', marker="x", color="red")
-        ax.scatter([best_epoch], [best_loss], label='best validate', marker="d", color="green")
+        for key,value in train_losses.items():
+            ax.plot(np.arange(len(value)), value, label=f'train_{key}', linestyle=":")
+        for key,value in valid_losses.items():
+            ax.plot(np.arange(len(value)) * self.args.eval_every_eps, value, label=f'valid_{key}', linestyle="-")
+        ax.scatter([self.args.epochs], [loss], label=f'test', marker="x", color="red")
+        ax.axvline(best_epoch, linestyle="--", color="green", label="best validate")
+        # ax.scatter([best_epoch], [best_loss], label='best validate', marker="d", color="green")
 
         ax.set_xlabel('epoch')
         ax.set_ylabel('loss')
@@ -325,8 +380,6 @@ class OneTrainer:
         ax.set_yscale('log')
         ax.legend()
         fig.savefig(self.loss_image_path)
-        if not os.path.exists("./.result"):
-            os.makedirs("./.result")
     
     def test(self, on_all_nodes=True, on_cpu=True):
         if on_cpu:
@@ -338,7 +391,12 @@ class OneTrainer:
         self.eval_mode()
         with torch.no_grad():
             loss        = self.compute_loss(mode="all" if on_all_nodes else "test")
-            loss        = loss.item()
+            if isinstance(loss, dict):
+                loss = loss['data loss'].item()
+            elif isinstance(loss, torch.Tensor):
+                loss = loss.item()
+            else:
+                raise NotImplementedError(f"loss type {type(loss)} is not implemented")
         return loss
 
 

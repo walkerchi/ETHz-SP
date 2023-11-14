@@ -7,27 +7,44 @@ import torch
 import torch_geometric as pyg
 bridge = importlib.import_module(".bridge", package=__package__)
 roof   = importlib.import_module(".roof", package=__package__)
+from .hollow_rectangle import hollow_rectangle
+
+from linear_elasticity import TrussSolver
 
 class Truss:
-    NAMES = ["bridge.pratt", "bridge.howe", "bridge.baltimore", "roof.pratt", "roof.howe"]
-    def __init__(self, name="bridge.pratt", E=1, A=1, n_grid=12, support=3):
-        self.mesh = {
+    NAMES = ["bridge.pratt", "bridge.howe", "bridge.baltimore", "roof.pratt", "roof.howe", "hollow_rectangle"]
+    def __init__(self, name="bridge.pratt", E=1, A=1, n_grid=12, support=3,
+                 d:float=0.2, # mesh size for hollow rectangle
+                a:float=2.0, # outer length for hollow rectangle
+                p:float=1.0, # pressure for hollow rectangle
+    ):
+        naive_truss = {
             "bridge.pratt": bridge.pratt,
             "bridge.howe": bridge.howe,
             "bridge.baltimore": bridge.baltimore,
             "roof.pratt": roof.pratt,
             "roof.howe": roof.howe,
-        }[name](n_grid=n_grid, 
-                    support=support, 
-                    E = E, A=A)
+        }
+        if name in naive_truss:
+            self.mesh = naive_truss[name](n_grid=n_grid, 
+                        support=support, 
+                        E = E, A=A)
+        elif name == "hollow_rectangle":
+            self.mesh = hollow_rectangle(d=d, E=E, A=A, a=a, p=p)
+        else:
+            raise NotImplementedError
         
-    def solve(self, ):
-        sys.path.append("../..")
-        from linear_elasticity import TrussSolver
-        truss_sol = TrussSolver(self.mesh)
-        u = truss_sol.scipy_solve()
-        strain, stress = truss_sol.compute_stress(u, return_strain=True)
-        return u, strain, stress
+        self.solver = TrussSolver(self.mesh)
+        
+    def solve(self):
+        u = self.solver.scipy_solve()
+        return u 
+    
+    def compute_residual(self, u, mse=True):
+        return self.solver.compute_residual(u, mse=mse)
+    
+    def plot(self, **kwargs):
+        return self.solver.plot(**kwargs)
 
     def as_graph(self):
 
@@ -54,10 +71,8 @@ class Truss:
         edges  = adj.indices().T
 
         # label data 
-        u, strain, stress = self.solve()
+        u = self.solve()
         displacement = torch.from_numpy(u).type(dtype)
-        strain       = torch.from_numpy(strain).type(dtype)
-        stress       = torch.from_numpy(stress).type(dtype)
         graph = pyg.data.Data(
             num_nodes           =   mesh.points.shape[0],   
             n_pos               =   torch.tensor(mesh.points, dtype=torch.float),
@@ -66,8 +81,6 @@ class Truss:
             n_source_mask       =   source_mask,
             n_source_value      =   source_value,
             n_displacement      =   displacement,
-            g_strain            =   strain,
-            g_stress            =   stress,
             # g_E         =   torch.tensor(self.pde_parameters["E"], dtype=dtype),
             # g_nu        =   torch.tensor(self.pde_parameters["nu"], dtype=dtype),
             edge_index  =   edges.T,

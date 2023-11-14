@@ -105,22 +105,30 @@ def deep_galerkin(args):
         raise NotImplementedError
     model = model.to(args.device)
     
-    optimizer = torch.optim.Adam(model.parameters(),  lr=0.005)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.85)
-    
+    optimizer = torch.optim.Adam(model.parameters(),  lr=args.lr)
+    if args.scheduler is None:
+        scheduler = None 
+    elif args.scheduler == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.step_gamma)
+    elif args.scheduler == "exp":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.exp_gamma)
+    elif args.scheduler == "cos":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epoch, eta_min=1e-7)
+    loss_fn   = nn.L1Loss()
     losses = []
-    epoch = 10000
-    pbar = tqdm(range(epoch))
+    
+    pbar = tqdm(range(args.epoch))
     best_loss, best_weight, best_epoch = 1e10, None, 0
     for ep in pbar:
         optimizer.zero_grad()
         K_local = model(pos) # [n_element* n_basis * n_basis, n_dim * n_dim]
         edata = P @ K_local # [n_edge, n_dim, n_dim]
         f_ = spmm(edges, edata.reshape(-1), u.shape[0], u.shape[0], u[:, None])[:, 0]
-        loss = (f-f_).pow(2).mean()
+        loss = loss_fn(f_[~mask], f[~mask])
         loss.backward()
         optimizer.step()
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
         pbar.set_postfix({"loss": loss.item()})
         if loss.item() < best_loss:
             best_epoch = ep
@@ -154,6 +162,7 @@ def deep_galerkin(args):
     if not os.path.exists(path):
         os.makedirs(path)
     fig.savefig(os.path.join(path,f"{args.model}.png"))
+    fig.savefig(os.path.join(path,f"{args.model}.pdf")) 
 
     fig, ax = plt.subplots(figsize=(8,6))
     ax.set_title("loss")
@@ -167,6 +176,7 @@ def deep_galerkin(args):
     if not os.path.exists(path):
         os.makedirs(path)
     fig.savefig(os.path.join(path,f"{args.model}.png"))
+    fig.savefig(os.path.join(path,f"{args.model}.pdf"))
 
 
 
@@ -174,6 +184,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=123456)	
     parser.add_argument('--device', type=str, default= "cpu")
-    parser.add_argument("--model", type=str,  default="linear", choices=['linear', 'bilinear'])
+    parser.add_argument("-m", "--model", type=str,  default="linear", choices=['linear', 'bilinear'])
+    parser.add_argument("-s","--scheduler", type=str, default=None, choices=["step", "exp", "cos"])
+    parser.add_argument("-ep","--epoch", type=int, default=20000)
+    parser.add_argument("--exp","--exp_gamma", type=float, default=0.999)
+    parser.add_argument("--step_size", type=int, default=500)
+    parser.add_argument("--step_gamma", type=float, default=0.9)
+    parser.add_argument("--lr",type=float, default=0.005)
     args = parser.parse_args()
     deep_galerkin(args)
