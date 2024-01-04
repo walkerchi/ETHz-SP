@@ -198,11 +198,6 @@ class TriangleSolver:
         B[:, :, :, 1, 1] = shape_grad[:,:,:,1]
         B[:, :, :, 2, 0] = shape_grad[:,:,:,1]
         B[:, :, :, 2, 1] = shape_grad[:,:,:,0]
-        # B           = np.zeros((n_element, n_quadrature, n_dim*(n_dim+1)//2, n_basis*n_dim)) # [n_element, n_quadrature, n_dim*(n_dim+1)/2,  n_basis*n_dim]
-        # B[:, :, 0, 0::n_dim] = shape_grad[:,:,:,0]
-        # B[:, :, 1, 1::n_dim] = shape_grad[:,:,:,1]
-        # B[:, :, 2, 0::n_dim] = shape_grad[:,:,:,1]
-        # B[:, :, 2, 1::n_dim] = shape_grad[:,:,:,0]
 
         #  1, nu, 0
         #  nu, 1, 0
@@ -233,7 +228,7 @@ class TriangleSolver:
         dirichlet_value= mesh.point_data["dirichlet_value"]
         source_value   = mesh.point_data["source_value"]
         source_mask    = mesh.point_data["source_mask"]
-        self.K_inner, self.K_ou2in = partite(K_coo, dirichlet_mask.ravel())
+        self.K_inner, self.K_ou2in, self.K_outer = partite(K_coo, dirichlet_mask.ravel())
         self.is_inner_dof = ~dirichlet_mask.ravel()
         self.is_outer_dof = dirichlet_mask.ravel()
         self.source_value  = source_value
@@ -243,8 +238,9 @@ class TriangleSolver:
 
         self.ele2msh_node = get_ele2msh_node(elements, n_points) # [n_points, n_element]
         self.shape_val= get_shape_val(quadrature_points, p=1) # [n_quadrature, n_basis]
+      
         self.D        = D      # [n_element, n_basis, n_basis]
-        self.B        = B      # [n_element, n_quadrature, n_basis, n_basis * n_dim]
+        self.B        = B      # [n_element, n_quadrature, n_basis, (n_dim+1)*n_dim / 2 , n_dim]
         self.mesh     = mesh
         self.points   = points # [n_point, n_dim]
         self.elements = elements # [n_element, n_basis]
@@ -253,6 +249,7 @@ class TriangleSolver:
         self.n_dim    = n_dim
         self.n_basis  = n_basis
         self.n_element= n_element
+        self.n_quadrature = n_quadrature
         self.E        = E if isinstance(E, np.ndarray) else np.full(n_element, fill_value=E)
         self.nu       = nu if isinstance(nu, np.ndarray) else np.full(n_element, fill_value=nu)
         self.ele2msh_edge_torch = torch.sparse_csr_tensor(
@@ -261,6 +258,17 @@ class TriangleSolver:
             torch.from_numpy(ele2msh_edge.data),
             size=ele2msh_edge.shape
         )
+        self.ele2msh_node_torch = torch.sparse_csr_tensor(
+            torch.from_numpy(self.ele2msh_node.indptr),
+            torch.from_numpy(self.ele2msh_node.indices),
+            torch.from_numpy(self.ele2msh_node.data),
+            size=self.ele2msh_node.shape
+        )
+        self.shape_val_torch = torch.from_numpy(self.shape_val) # [n_quadrature, n_basis]
+        self.shape_grad_torch= torch.from_numpy(shape_grad) # [n_element, n_quadrature, n_basis, n_dim]
+        self.jxw_torch      = torch.from_numpy(jxw)    # [n_element, n_quadrature]
+        self.B_torch        = torch.from_numpy(B)      # [n_element, n_quadrature, n_dim*(n_dim+1)/2, n_basis * n_dim]
+        self.D_torch        = torch.from_numpy(D)      # [n_element, n_dim*(n_dim+1)/2, n_dim*(n_dim+1)/2]
         self.K_torch  = torch_bsr_matrix_from_coo(
             K_global.reshape(n_edges, n_dim, n_dim), edge_u, edge_v, shape=(n_points,  n_points)
         ) # [n_dim * n_point, n_dim * n_point]
@@ -295,6 +303,8 @@ class TriangleSolver:
             --------
                 u: np.ndarray, shape [n_point, n_dim]
                     displacement of the points
+                F: np.ndarray, shape [n_point, n_dim]
+                    load of the points
         """
         if dirichlet_mask is None:
             assert "dirichlet_mask" in self.mesh.point_data.keys(), "dirichlet_mask should be provided"
@@ -323,7 +333,9 @@ class TriangleSolver:
         u[dirichlet_mask.ravel()] = dirichlet_value[dirichlet_mask].ravel() # [n_point * n_dim]
 
         # condensing
-        K_inner, K_ou2in = partite(self.K_coo, dirichlet_mask.ravel())
+        K_inner, K_ou2in, K_outer = self.K_inner, self.K_ou2in, self.K_outer
+        # K_inner, K_ou2in, K_outer = partite(self.K_coo, dirichlet_mask.ravel())
+        
         F_inner = F[~dirichlet_mask.ravel()] - K_ou2in @ u[dirichlet_mask.ravel()]
 
         # solve
@@ -331,7 +343,9 @@ class TriangleSolver:
   
         u[~dirichlet_mask.ravel()] = u_inner
 
-        return u.reshape(self.n_points, self.n_dim)
+        F[dirichlet_mask.ravel()] = K_outer @ u[dirichlet_mask.ravel()] + K_ou2in.T @ u_inner
+
+        return u.reshape(self.n_points, self.n_dim), F.reshape(self.n_points, self.n_dim)
     
     def compute_stress(self, u, return_strain=False, return_vm_stress=False):
         """
@@ -381,31 +395,89 @@ class TriangleSolver:
         else:
             return returns
 
-    def compute_residual(self, u, mse=True):
+
+    def compute_residual_strong_form(self, u, f, mse=True):
+        self.K_torch = self.K_torch.type(u.dtype).to(u.device)
+    
+        r = self.K_torch @ u.reshape(-1, 1) - f.reshape(-1, 1)
+        
+        if mse:
+            return (r * r).mean()
+        else:
+            return r.reshape(self.n_points, self.n_dim)
+
+    def compute_residual_weak_form(self, u, f, mse=True):
+        self.B_torch = self.B_torch.type(u.dtype).to(u.device)
+        self.D_torch = self.D_torch.type(u.dtype).to(u.device)
+        self.shape_grad_torch = self.shape_grad_torch.type(u.dtype).to(u.device)
+        self.shape_val_torch = self.shape_val_torch.type(u.dtype).to(u.device)
+        self.jxw_torch = self.jxw_torch.type(u.dtype).to(u.device)
+        self.ele2msh_node_torch = self.ele2msh_node_torch.type(u.dtype).to(u.device)
+
+        B = self.B_torch # [n_element, n_quadrature, n_basis, n_dim*(n_dim+1)/2,  n_dim]
+        D = self.D_torch # [n_element, n_dim*(n_dim+1)/2, n_dim*(n_dim+1)/2]
+        jxw = self.jxw_torch
+        shape_val= self.shape_val_torch # [n_quadrature, n_basis]
+        shape_grad = self.shape_grad_torch  # [n_element, n_quadrature, n_basis, n_dim]
+
+        # elem_u = u[self.elements] # [n_element, n_basis, n_dim]
+        # Lhs_local    = torch.einsum(f"qj, eqjmd, emn, eqind, qi, ebd->eqijd", shape_val, B, D, B, shape_val, elem_u) # [n_element, n_basis, n_basis, n_dim, n_dim]")
+        
+        gradu = torch.einsum("eqbi, ebi->eqi", self.shape_grad_torch, u[self.elements]) # [n_element, n_quadrature, n_dim]
+
+        Bu           = torch.zeros((self.n_element, self.n_quadrature, self.n_dim*(self.n_dim+1)//2, self.n_dim), dtype=u.dtype, device=u.device)
+        Bu[:, :, 0, 0] = gradu[:, :, 0]
+        Bu[:, :, 1, 1] = gradu[:, :, 1]
+        Bu[:, :, 2, 0] = gradu[:, :, 1]
+        Bu[:, :, 2, 1] = gradu[:, :, 0]
+
+        
+        Lhs_local = torch.einsum("eqid, eij, eqbjd, eq->ebd", Bu, D, B, jxw) # [n_element, n_basis, n_dim]
+
+        Rhs_local = torch.einsum("ebd, qb, eq->ebd", f[self.elements], shape_val, jxw) # [n_element, n_basis, n_dim]
+        
+        R_local   = Lhs_local - Rhs_local
+
+        R_global  = self.ele2msh_node_torch @ R_local.reshape(self.n_element * self.n_basis, -1) # [n_point, n_dim]
+
+        if mse:
+            return (R_global ** 2).mean()
+        else:
+            return R_global.reshape(self.n_points, self.n_dim)
+
+    def compute_residual(self, u, f, mse=True, form="strong"):
         """
             Parameters:
             -----------
                 u: np.ndarray, shape [n_point, n_dim]
                     displacement of the points
+                f: np.ndarray, shape [n_point, n_dim]
+                    load of the points
             Returns:
             --------
                 residual: np.ndarray, shape [n_point, n_dim] or float  if mse is True
                     residual of the points
         """
-        if isinstance(u, torch.Tensor):
-            self.K_torch = self.K_torch.type(u.dtype).to(u.device)
-            f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device)
-            r = self.K_torch @ u.reshape(-1, 1) - f.reshape(-1, 1)
-        elif isinstance(u, np.ndarray):
-            r = self.K_coo @ u.ravel() - self.source_value.ravel()
+        if isinstance(u, np.ndarray):
+            u = torch.from_numpy(u)
+            f = torch.from_numpy(f)
+            is_numpy = True
+        elif isinstance(u, torch.Tensor):
+            is_numpy = False
         else:
             raise NotImplementedError(f"u should be torch.Tensor or np.ndarray, but got {type(u)}")
-        if mse:
-            return (r * r).mean()
+        if form  == "strong":
+            r = self.compute_residual_strong_form(u, f, mse=mse)
+        elif form == "weak":
+            r = self.compute_residual_weak_form(u, f, mse=mse)
         else:
-            return  r.reshape(self.n_points, self.n_dim)
+            raise NotImplementedError(f"form: {form} is not implemented")
+        if is_numpy:
+            return r.numpy()
+        else:
+            return r
 
-    def plot(self, **kwargs):
+    def plot(self, show=True, **kwargs):
         """
             Parameters:
             -----------
@@ -440,6 +512,7 @@ class TriangleSolver:
                 ax[0,i].set_title(k)
                 cb = plt.colorbar(tpc, ax=ax[0,i])
                 cb.set_label(k)
+        if show:
             plt.show()
                 
 

@@ -13,6 +13,7 @@ from linear_elasticity import TrussSolver
 
 class Truss:
     NAMES = ["bridge.pratt", "bridge.howe", "bridge.baltimore", "roof.pratt", "roof.howe", "hollow_rectangle"]
+    PREFIX = ["bridge", "roof", "hollow_rectangle"]
     def __init__(self, name="bridge.pratt", E=1, A=1, n_grid=12, support=3,
                  d:float=0.2, # mesh size for hollow rectangle
                 a:float=2.0, # outer length for hollow rectangle
@@ -40,8 +41,8 @@ class Truss:
         u = self.solver.scipy_solve()
         return u 
     
-    def compute_residual(self, u, mse=True):
-        return self.solver.compute_residual(u, mse=mse)
+    def compute_residual(self, u,f, mse=True):
+        return self.solver.compute_residual(u,f, mse=mse)
     
     def plot(self, **kwargs):
         return self.solver.plot(**kwargs)

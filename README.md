@@ -30,6 +30,16 @@ This thesis aims to formalize the equivalence between message passing neural net
 - Demonstrate the method on a simple case study, exploring its advantages and limitations.
 
 
+## Usage 
+
+train SIGN
+```bash 
+cd src 
+python main.py -c config/hyperparameter/sign.toml
+```
+
+
+
 
 ## Involvements
 

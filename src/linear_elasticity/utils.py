@@ -84,15 +84,16 @@ def partite(K_coo:scipy.sparse.coo_matrix, dirichlet_mask:np.ndarray):
         arange= lambda x: np.arange(x)
         coo_matrix = lambda edata, row, col, shape: scipy.sparse.coo_matrix((edata, (row, col)), shape=shape)
         tocsr = lambda x: x.tocsr()
+        src, dst, edata = K_coo.row, K_coo.col, K_coo.data
     elif isinstance(K_coo, torch.Tensor):
         ravel = lambda x: x.view(-1)
-        full  = lambda x, fill_value: torch.full(x, fill_value=fill_value)
+        full  = lambda x, fill_value: torch.full((x,), fill_value=fill_value)
         arange= lambda x: torch.arange(x)
-        coo_matrix = lambda edata, row, col, shape: torch.sparse_coo_tensor((row, col), edata, shape=shape)
-        tocsr = lambda x: x.coalesce().tocsr()
+        coo_matrix = lambda edata, row, col, shape: torch.sparse_coo_tensor(torch.stack([row, col],0), edata, size=shape)
+        tocsr = lambda x: x.coalesce().to_sparse_csr()
+        src, dst, edata = K_coo._indices()[0], K_coo._indices()[1], K_coo._values()
 
-
-    src, dst, edata = K_coo.row, K_coo.col, K_coo.data
+        
     n_node          = K_coo.shape[0]
     is_node_inner = ~ravel(dirichlet_mask) # [n_point * n_dim]
     is_node_outer = ravel(dirichlet_mask) # [n_point * n_dim]
@@ -105,11 +106,13 @@ def partite(K_coo:scipy.sparse.coo_matrix, dirichlet_mask:np.ndarray):
     is_src_outer, is_dst_outer = is_node_outer[src], is_node_outer[dst] # [n_edge]
     is_e_inner    = is_src_inner & is_dst_inner # [n_edge]
     is_e_ou2in    = is_src_inner & is_dst_outer # [n_edge]
+    is_e_outer    = is_src_outer & is_dst_outer # [n_edge]
     local_nids    = full(n_node, fill_value=-1)
     local_nids[is_node_inner] = arange(n_node_inner)
     local_nids[is_node_outer] = arange(n_node_outer)
     src_inner, dst_inner = local_nids[src[is_e_inner]], local_nids[dst[is_e_inner]] # [n_edge_inner]
     src_ou2in, dst_ou2in = local_nids[src[is_e_ou2in]], local_nids[dst[is_e_ou2in]] # [n_edge_ou2in]
+    src_outer, dst_outer = local_nids[src[is_e_outer]], local_nids[dst[is_e_outer]] # [n_edge_outer]
     edata_inner, edata_ou2in = edata[is_e_inner], edata[is_e_ou2in] # [n_edge_inner]
     K_inner = coo_matrix(
         edata_inner, src_inner, dst_inner, shape=(n_node_inner, n_node_inner)
@@ -117,8 +120,13 @@ def partite(K_coo:scipy.sparse.coo_matrix, dirichlet_mask:np.ndarray):
     K_ou2in = coo_matrix(
         edata_ou2in, src_ou2in, dst_ou2in, shape=(n_node_inner, n_node_outer)
     ) # [n_node_inner, n_node_outer]
-    K_inner, K_ou2in = tocsr(K_inner), tocsr(K_ou2in)
-    return K_inner, K_ou2in
+    K_outer = coo_matrix(
+        edata[is_e_outer], src_outer, dst_outer, shape=(n_node_outer, n_node_outer)
+    ) # [n_node_outer, n_node_outer]
+    K_inner, K_ou2in, K_outer = tocsr(K_inner), tocsr(K_ou2in), tocsr(K_outer)
+
+
+    return K_inner, K_ou2in, K_outer
 
 
 

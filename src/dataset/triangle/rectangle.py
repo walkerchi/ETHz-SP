@@ -10,7 +10,11 @@ def rectangle(
     nu:float=0.4, # Poisson's ratio
     a:float=2.0, # outer length
     p:float=1.0, # pressure
+    fn=lambda p,x,y:p, # pressure function
+    boundary="bottom"
 ):
+    if fn is None:
+        fn = lambda x: p
     """
         hollow rectangle with bottom fixed boundary and top pressure
     """
@@ -32,13 +36,20 @@ def rectangle(
     y_axis            = 1
     is_bottom         = np.isclose(mesh.points[:, y_axis], 0)
     is_top            = np.isclose(mesh.points[:, y_axis], a)
+    is_left           = np.isclose(mesh.points[:, 0], 0)
+    is_right          = np.isclose(mesh.points[:, 0], a)
     dirichlet_mask    = np.zeros_like(mesh.points).astype(bool)
-    dirichlet_mask[is_bottom, :] = True
+    if "bottom" in boundary:
+        dirichlet_mask[is_bottom, :] = True
+    if "left" in boundary:
+        dirichlet_mask[is_left, :] = True
+    if "right" in boundary:
+        dirichlet_mask[is_right, :] = True
     dirichlet_value   = np.zeros_like(mesh.points)
     source_mask       = np.zeros_like(mesh.points).astype(bool)
     source_mask[is_top, y_axis] = True
     source_value      = np.zeros_like(mesh.points)
-    source_value[is_top, y_axis]= -p
+    source_value[is_top, y_axis]= -fn(p, mesh.points[is_top, 0], mesh.points[is_top, 1])
 
     mesh.point_data = {
         "dirichlet_mask": dirichlet_mask,
@@ -51,3 +62,4 @@ def rectangle(
     mesh.field_data["nu"] = np.ones(len(mesh.cells_dict['triangle']),dtype=np.float64) * nu
 
     return mesh
+

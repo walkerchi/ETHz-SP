@@ -12,6 +12,7 @@ from linear_elasticity import TetraSolver
 
 class Tetra:
     NAMES = ["cube", "spherical_shell"]
+    PREFIX  = ["cube", "spherical_shell"]
     def __init__(self, 
                  name="cube", 
                  E=1, nu=0.3, 

@@ -1,0 +1,9 @@
+seed = 123456
+task = "test"
+model = "GCN"
+dataset = "rectangle_sin2"
+d = 0.1
+train_ratios = [ 0.0, 0.1, 0.3,]
+num_hops = 8
+loss = "equal"
+condense = "static"

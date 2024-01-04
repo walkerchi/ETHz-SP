@@ -26,7 +26,7 @@ def parse_args(parser):
     parser.add_argument('--p', type=float, default=1.0, help="pressure")
     parser.add_argument('--n_grid', type=int, default=12, help="number of grid")
     parser.add_argument('--n_support', type=int, default=3, help="support of boundary condition")
-
+    parser.add_argument('--n_samples', type=int, default=4,  help="number of samples")
     # for trainer 
     parser.add_argument("--trainer", type=str, default="one", choices=["one", "multi"])
     parser.add_argument('--lr', type=float, default=0.01)
@@ -36,15 +36,19 @@ def parse_args(parser):
     parser.add_argument('--train_ratios', nargs="+", default=None)
     parser.add_argument('--test_ratio', type=float, default=0.5)
     parser.add_argument('--eval_every_eps', type=int, default=5)
-    parser.add_argument('--use_physics', action="store_true")
+    parser.add_argument('--physical_loss', type=str, default=None, choices=["strong","weak"])
     parser.add_argument('--physical_weight', type=float, default=1.0)
-
+    parser.add_argument('--loss', type=str, default="weight", choices=["equal", "weight", "auto_weight"])
+    parser.add_argument('--scheduler', type=str, default='none', choices=['none', 'cos','step','exp'])
+    parser.add_argument('--use_pos', action='store_true')
 
     parser.add_argument('--dataset', type=str, default='spherical_shell')
     # for general model
+    parser.add_argument("--encoder", type=str, default=None, choices=[None, "mlp"])
+    parser.add_argument("--decoder", type=str, default=None, choices=[None, "mlp"])
     parser.add_argument('--use_edata', action='store_true')
-    parser.add_argument('--use_condense', action='store_true')
-    parser.add_argument('--condense_model', type=str, default="gin-2", choices=['gin-2'] )
+    parser.add_argument('--condense', type=str, default=None,  choices=["static", "nn", "nn_dense"])
+    # parser.add_argument('--condense_model', type=str, default="gin-2", choices=['gin-2'] )
     parser.add_argument('--model', type=str, default='GCN')
     parser.add_argument('--hidden_dim', type=int, default=64)
     parser.add_argument('--num_layers', type=int, default=3)
@@ -57,10 +61,10 @@ def parse_args(parser):
 
     # for GraphUNet
     parser.add_argument('--depth', type=int, default=3)
-    parser.add_argument('--pool_ratios', type=float, default=2)
-    parser.add_argument('--act', type=str, default='ReLU')
-    parser.add_argument('--conv', type=str, default='GCNConv')
-    parser.add_argument('--pool', type=str, default='TopKPooling')
+    parser.add_argument('--pool_ratios', type=float, default=.5)
+    parser.add_argument('--act', type=str, default='relu')
+    parser.add_argument('--conv', type=str, default='gcn')
+    parser.add_argument('--pool', type=str, default='topk', choices=['topk', 'sag', 'bistride'])
 
     # for result
     args = parser.parse_args()
@@ -95,17 +99,18 @@ class FileParser:
                     raise Exception(f"Argument {arg} should have default value")
                 self.args[arg] = self.args.get(arg, default)
           
-            
-        if "choices" in kwargs:
-            assert self.args[arg] in kwargs["choices"], f"Argument {arg} should be in {kwargs['choices']}, but got {self.args[arg]}"
-        if "type" in kwargs:
-            self.args[arg] = kwargs["type"](self.args[arg])
+        if self.args[arg] is not None:
+            if "choices" in kwargs:
+                assert self.args[arg] in kwargs["choices"], f"Argument {arg} should be in {kwargs['choices']}, but got {self.args[arg]}"
+            if "type" in kwargs:
+                self.args[arg] = kwargs["type"](self.args[arg])
     
     def parse_args(self):
         x = argparse.Namespace()
         for key, value in self.args.items():
-            if value is not None:
-                x.__dict__[key] = value
+            # if value is not None:
+            x.__dict__[key] = value
+       
         return x
         
 class DictParser(FileParser):
@@ -142,46 +147,47 @@ def parse_file():
     #    assert args.folder is None and args.config is None
     #    return parse_args(DictParser(task="all_infer"))
 
+def manual_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    
+def run_trainer(arg):
+    manual_seed(arg.seed)
+    Trainer = {
+        "one": OneTrainer,
+        "multi": MultiTrainer,
+    }[arg.trainer]
+  
+    if arg.task == "train":
+        trainer = Trainer(arg)
+        if arg.train_ratios is not None:
+            for train_ratio in arg.train_ratios:
+                print(f"train_ratio: {train_ratio}")
+                arg.train_ratio = train_ratio
+                trainer = Trainer(arg)
+                if not os.path.exists(trainer.model_weight_path) or not os.path.exists(trainer.loss_image_path) or arg.force:
+                    trainer.fit()
+        else:
+            if not os.path.exists(trainer.model_weight_path) or not os.path.exists(trainer.loss_image_path) or args.force:
+                trainer.fit()
+    elif arg.task == "test":
+        if arg.train_ratios is not None:
+            result = {}
+            for train_ratio in arg.train_ratios:
+                print(f"train_ratio : {train_ratio}")
+                arg.train_ratio = train_ratio
+                mse = Trainer(arg).test()
+                result[train_ratio] = mse
+            return result
+        else:
+            return Trainer(arg).test()
+    else:
+        raise NotImplementedError()
+        
 
 if __name__ == '__main__':
-    def manual_seed(seed):
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        np.random.seed(seed)
-      
-    def run_trainer(arg):
-        manual_seed(arg.seed)
-        Trainer = {
-            "one": OneTrainer,
-            "multi": MultiTrainer,
-        }[arg.trainer]
-        
-        if arg.task == "train":
-            trainer = Trainer(arg)
-            if arg.train_ratios is not None:
-                for train_ratio in arg.train_ratios:
-                    print(f"train_ratio: {train_ratio}")
-                    arg.train_ratio = train_ratio
-                    trainer = Trainer(arg)
-                    if not os.path.exists(trainer.model_weight_path) or not os.path.exists(trainer.loss_image_path) or arg.force:
-                        trainer.fit()
-            else:
-                if not os.path.exists(trainer.model_weight_path) or not os.path.exists(trainer.loss_image_path) or args.force:
-                    trainer.fit()
-        elif arg.task == "test":
-            if arg.train_ratios is not None:
-                result = {}
-                for train_ratio in arg.train_ratios:
-                    print(f"train_ratio : {train_ratio}")
-                    arg.train_ratio = train_ratio
-                    mse = Trainer(arg).test()
-                    result[train_ratio] = mse
-                return result
-            else:
-                return Trainer(arg).test()
-        else:
-            raise NotImplementedError()
-        
+
     args = parse_file()
     
     if isinstance(args, (list, tuple)):
@@ -192,11 +198,12 @@ if __name__ == '__main__':
                 assert arg.task == "test", f"task should be test for folder of test, but got {arg.task}"
                 print(f"Configurations {i+1}/{len(args)}")
                 mse = run_trainer(arg)
-                if arg.use_condense:
-                    results[f"{arg.model}_condense"] = mse
+                if arg.condense is not None:
+                    results[f"{arg.model}_{arg.condense}_condense"] = mse
                 else:
                     results[arg.model] = mse
-            plot_test(results, f"test on {args[0].dataset} with characteristic length {args[0].d}", f"./.result/{arg.trainer}/test_score_{args[0].d}{'_phy' if arg.use_physics else ''}.png")
+            plot_test(results, f"test on {args[0].dataset} with characteristic length {args[0].d}", 
+                      f"./.result/{arg.trainer}/test_score_{arg.dataset}_{arg.d}{f'_{arg.physical_loss}_phy' if arg.physical_loss is not None else ''}_{arg.loss}.png")
         else:
             for i,arg in enumerate(args):
                 assert arg.train_ratio + arg.test_ratio <= 1.0, f"train_ratio + test_ratio should be less than 1.0"
@@ -204,5 +211,5 @@ if __name__ == '__main__':
                 run_trainer(arg)
     else:
         assert args.train_ratio + args.test_ratio <= 1.0, f"train_ratio + test_ratio should be less than 1.0"
-    
+
         run_trainer(args)

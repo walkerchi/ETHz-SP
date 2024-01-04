@@ -1,0 +1,11 @@
+gmsh 
+torch 
+pytorch_geometric
+meshio
+numpy 
+matplotlib 
+tqdm 
+argparse
+pandas 
+seaborn
+toml

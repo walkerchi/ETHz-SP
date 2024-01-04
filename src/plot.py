@@ -22,19 +22,21 @@ def plot_test(test_scores, title, path=None):
         "model":[],
         "train_ratio":[],
         "mse":[],
-        "use_condense":[]
+        "condense_type":[]
     }
     for i,(model, loss_per_ratio) in enumerate(test_scores.items()):
         for train_ratio, loss in loss_per_ratio.items():
             data["model"].append(model.split("_")[0])
             data["train_ratio"].append(train_ratio)
             data["mse"].append(loss)
-            if model.endswith("_condense"):
-                data["use_condense"].append(True)
+            if model.endswith("_static_condense"):
+                data["condense_type"].append("static")
+            elif model.endswith("_condense"):
+                data["condense_type"].append("nn")
             else:
-                data["use_condense"].append(False)
+                data["condense_type"].append("none")
     df = pd.DataFrame(data)
-    sns.lineplot(data=df, x="train_ratio", y="mse", hue="model", style="use_condense" , markers=True, ax=ax)
+    sns.lineplot(data=df, x="train_ratio", y="mse", hue="model", style="condense_type" , markers=True, ax=ax)
     # sns.scatterplot(data=df, x="train_ratio", y="mse", hue="model", style="use_condense" , ax=ax, label=None)
 
     # if isinstance(next(iter(test_scores.values())), dict): # dict[str,dict[float,float]]

@@ -1,0 +1,15 @@
+seed = 123456
+device = "cuda"
+task = "train"
+model = "MLP"
+dataset = "rectangle_sin2"
+d = 0.1
+lr = 0.0005
+epochs = 10000
+train_ratios = [ 0.0, 0.1, 0.3,]
+test_ratio = 0.5
+eval_every_eps = 5
+physical_weight = 0.01
+num_hops = 8
+loss = "weight"
+physical_loss = "strong"

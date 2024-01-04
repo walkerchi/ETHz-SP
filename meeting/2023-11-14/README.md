@@ -61,7 +61,11 @@ K_{IB}^\top & K_{BB}
 \begin{bmatrix}
 u_I\\u_B
 \end{bmatrix}
-\to K_{II} x_I = f_I - K_{IB}u_B
+=
+\begin{bmatrix}
+f_I\\f_B
+\end{bmatrix}
+\to K_{II} u_I = f_I - K_{IB}u_B
 $$
 
 - $K$ is the stiffness matrix(rank-$4$ tensor for linear elasticity), $K\in \R^{(|\mathcal V|\times d)\times (|\mathcal V|\times d)}\leftrightarrow \R_{\text{sparse}}^{|\mathcal V|\times |\mathcal V|\times d\times d}$

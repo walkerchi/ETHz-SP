@@ -390,16 +390,18 @@ class TrussSolver:
         # K_ou2in = scipy.sparse.coo_matrix((
         #     edata_ou2in, (src_ou2in, dst_ou2in)
         # ), shape=(n_node_inner, n_node_outer)).tocsr() # [n_node_inner, n_node_outer]
-        K_inner, K_ou2in = partite(self.K_coo, dirichlet_mask.ravel())
+        K_inner, K_ou2in, K_outer = partite(self.K_coo, dirichlet_mask.ravel())
         F_inner = F[~dirichlet_mask.ravel()] - K_ou2in @ u[dirichlet_mask.ravel()]
 
         # solve
         u_inner = scipy.sparse.linalg.spsolve(K_inner, F_inner)
         u[~dirichlet_mask.ravel()] = u_inner
 
-        return u.reshape(self.n_points, self.n_dim)
+        F[dirichlet_mask.ravel()] = K_outer @ u[dirichlet_mask.ravel()] + K_ou2in.T @ u_inner
+
+        return u.reshape(self.n_points, self.n_dim), F.reshape(self.n_points, self.n_dim)
     
-    def compute_residual(self, u, mse=True):
+    def compute_residual(self, u, f, mse=True):
         """
             Parameters:
             -----------
@@ -412,10 +414,13 @@ class TrussSolver:
         """
         if isinstance(u, torch.Tensor):
             self.K_torch = self.K_torch.to(u.device).type(u.dtype)
-            f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device).reshape(self.n_points * self.n_dim, 1)
+            # f = torch.from_numpy(self.source_value).type(u.dtype).to(u.device).reshape(self.n_points * self.n_dim, 1)
+            f = torch.from_numpy(f)
             r = (self.K_torch @ u.reshape(-1, 1)) - f
         elif isinstance(u, np.ndarray):
-            f = self.source_value.reshape(self.n_points * self.n_dim)
+            # f = self.source_value.reshape(self.n_points * self.n_dim)
+            # f = torch.from_numpy(f)
+            f = f.reshape(-1)
             r = (self.K_coo @ u.reshape(-1)) - f
         else:
             raise NotImplementedError
