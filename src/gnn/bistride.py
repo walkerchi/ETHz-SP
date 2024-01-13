@@ -1,6 +1,5 @@
 import torch 
 import numpy as np
-import numba as nb 
 import scipy.sparse
 from scipy.sparse import coo_matrix
 from enum import Enum

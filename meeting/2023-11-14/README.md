@@ -125,7 +125,7 @@ def b_gnn(x_src, edge_index, num_dst_nodes)
 
 ### Galerkin Equivelant Architecture (GEA)
 
-**Local Pesudo Linear GEA**
+**Local Pseudo Linear GEA**
 $$
 \text{MLP}_\theta(x)\approx \hat K_{\text{local}}
 $$
@@ -140,7 +140,7 @@ $$
 
 
 
-**Local Pesudo Bilinear GEA**
+**Local Pseudo Bilinear GEA**
 $$
 \begin{aligned}
 \text{MLP}_{\theta_1}(x)\approx B

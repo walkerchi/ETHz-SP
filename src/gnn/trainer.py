@@ -403,9 +403,6 @@ class OneTrainer:
                 self.loss.parameters()), 
                 lr=args.lr)
         
-
-        
-
     def init_scheduler(self, args):
         if args.scheduler == "none":
             self.scheduler = None
@@ -703,7 +700,7 @@ class OneTrainer:
 class MultiTrainer(OneTrainer):
     def __init__(self, args):
         self.train_datasets = []
-        # source = "A"
+        source = "A"
         for _ in range(args.n_samples):
             for load in ["sin1","cos1", "sin2", "cos2", "sin4", "cos4"]:
                 for source, boundary in [("A","B"),("A","C"),("A","D"),("A","B+C"),("A","B+D"),("A","C+D"),
@@ -731,6 +728,8 @@ class MultiTrainer(OneTrainer):
                         b = args.b,
                         p = args.p,
                     ))
+
+        # self.train_datasets.append(init_dataset(args))
 
         print(f"""
               
@@ -769,6 +768,8 @@ class MultiTrainer(OneTrainer):
         graphs_b2i = self.train_graphs_b2i if graph_b2i is None else [graph_b2i]
 
 
+        VALID_PHY = False
+        # breakpoint()
         for i in range(len(graphs)):
             if self.args.condense is not None:
                 u = self.predict(graphs[i], graphs_i[i], graphs_b2i[i])
@@ -789,13 +790,13 @@ class MultiTrainer(OneTrainer):
                     u_labeled = u 
                     y_labeled = y
             
-            if u_labeled.numel() == 0:
+            if u_labeled.numel() == 0 or (VALID_PHY and mode=="valid"):
                 assert self.args.physical_loss is not None, f"no data is calculated as loss, it's only allowed when physical_loss is not None"
                 loss = torch.tensor(0.0)
             else:
                 loss = torch.nn.MSELoss()(u_labeled, y_labeled)
 
-            if self.args.physical_loss is not None and mode == "train":
+            if self.args.physical_loss is not None and (mode == "train" or (VALID_PHY and mode=="valid")):
                 if self.args.condense is not None:
                     u_global = torch.zeros_like(graphs[i].n_pos, dtype=self.dtype, device=u.device)
                     u_global[~graphs[i].n_dirichlet_mask] += u 
