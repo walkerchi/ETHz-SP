@@ -3,3 +3,4 @@ src/.cache/
 src/.result/
 **.cache**
 reference/
+report/
